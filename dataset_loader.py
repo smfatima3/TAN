@@ -76,7 +76,7 @@ class DatasetLoader:
         
         # Load dataset
         dataset = load_dataset(
-            "JetBrains-Research/lca-bug-localization",
+            "(JetBrains-Research/lca-bug-localization', 'py')",
             cache_dir=self.cache_dir
         )
         
