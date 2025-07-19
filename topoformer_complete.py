@@ -467,7 +467,8 @@ class TopologicalAttention(nn.Module):
         
         # Apply mask if provided
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2) == 0, -1e9)
+            filler_value = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2) == 0, filler_value)
         
         # Attention probabilities
         attn_probs = F.softmax(scores, dim=-1)
