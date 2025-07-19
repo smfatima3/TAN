@@ -3,6 +3,9 @@ Complete Topoformer Implementation with Real Persistent Homology
 Author: AI Research Team
 Date: 2024
 """
+import os
+import sys
+import json
 
 import torch
 import torch.nn as nn
@@ -558,7 +561,7 @@ class TopoformerLayer(nn.Module):
         
         # Multi-scale attention
         # 1. Standard token attention
-        token_out, _ = self.token_attention(x, x, x, attn_mask=mask)
+        token_out, _ = self.token_attention(x, x, x, key_padding_mask=mask)
         
         # 2. Topological attention at each scale
         topo_outputs = []
