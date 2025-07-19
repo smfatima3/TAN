@@ -3,9 +3,6 @@ Complete Topoformer Implementation with Real Persistent Homology
 Author: AI Research Team
 Date: 2024
 """
-import os
-import sys
-import json
 
 import torch
 import torch.nn as nn
@@ -467,8 +464,7 @@ class TopologicalAttention(nn.Module):
         
         # Apply mask if provided
         if mask is not None:
-            filler_value = torch.finfo(scores.dtype).min
-            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2) == 0, filler_value)
+            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2) == 0, -1e9)
         
         # Attention probabilities
         attn_probs = F.softmax(scores, dim=-1)
@@ -562,7 +558,7 @@ class TopoformerLayer(nn.Module):
         
         # Multi-scale attention
         # 1. Standard token attention
-        token_out, _ = self.token_attention(x, x, x, key_padding_mask=mask)
+        token_out, _ = self.token_attention(x, x, x, attn_mask=mask)
         
         # 2. Topological attention at each scale
         topo_outputs = []
