@@ -20,6 +20,7 @@ import wandb
 from dataclasses import dataclass, asdict
 import matplotlib.pyplot as plt
 import seaborn as sns
+from transformers import AutoTokenizer  # Added this import
 
 # Import our modules
 from topoformer_complete import (
@@ -177,7 +178,9 @@ class Trainer:
         for step, batch in enumerate(progress_bar):
             # Move batch to device
             input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
+            
+            attention_mask_int = batch['attention_mask'].to(self.device)
+            attention_mask = (attention_mask_int == 0)
             labels = batch['labels'].to(self.device)
             
             # Forward pass with mixed precision
@@ -383,18 +386,21 @@ class Trainer:
         }
 
 
-def create_model(config: ExperimentConfig, num_labels: int) -> nn.Module:
+def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> nn.Module:
     """Create model based on configuration"""
     
     if config.model_type == 'topoformer':
+        # Get vocab size from tokenizer if available, otherwise use default
+        vocab_size = len(tokenizer) if tokenizer else 50000
+        
         topo_config = TopoformerConfig(
-            vocab_size=30000,
+            vocab_size=vocab_size,
             embed_dim=config.topoformer_embed_dim,
             num_layers=config.topoformer_layers,
             num_heads=config.topoformer_heads,
             k_neighbors=config.k_neighbors,
             max_homology_dim=config.max_homology_dim,
-            max_seq_len=config.max_seq_length,
+            max_seq_len=max(512, config.max_seq_length),  # Ensure sufficient length
             mixed_precision=config.mixed_precision,
             gradient_checkpointing=True
         )
@@ -412,6 +418,12 @@ def run_experiment(config: ExperimentConfig) -> Dict:
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     
+    # Add CUDA debugging if available
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        # Enable better CUDA error messages
+        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    
     # Create experiment tracker
     tracker = ExperimentTracker(config)
     
@@ -423,31 +435,46 @@ def run_experiment(config: ExperimentConfig) -> Dict:
         train_dataset, val_dataset, metadata = loader.load_bug_localization_dataset(
             subset_size=config.train_samples
         )
+        # Get tokenizer for vocab size
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained('microsoft/codebert-base')
     elif config.dataset_name == 'multi_eurlex':
         train_dataset, val_dataset, metadata = loader.load_multi_eurlex_dataset(
             subset_size=config.train_samples
         )
+        tokenizer = AutoTokenizer.from_pretrained('bert-base-multilingual-cased')
     elif config.dataset_name == 'arxiv':
         train_dataset, val_dataset, metadata = loader.load_arxiv_papers_dataset(
             subset_size=config.train_samples
         )
+        tokenizer = AutoTokenizer.from_pretrained('google/bigbird-pegasus-large-arxiv')
     elif config.dataset_name == 'wikipedia':
         train_dataset, val_dataset, metadata = loader.load_wikipedia_dataset(
             subset_size=config.train_samples
         )
+        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
     else:
         raise ValueError(f"Unknown dataset: {config.dataset_name}")
     
-    # Create data loaders
-    train_loader, val_loader = create_data_loaders(
-        train_dataset, val_dataset,
-        batch_size=config.batch_size,
-        num_workers=4
-    )
+    # Create data loaders with error handling
+    try:
+        train_loader, val_loader = create_data_loaders(
+            train_dataset, val_dataset,
+            batch_size=config.batch_size,
+            num_workers=0 if config.device == 'cuda' else 4  # Avoid multiprocessing issues with CUDA
+        )
+    except Exception as e:
+        logger.error(f"Error creating data loaders: {e}")
+        # Try with num_workers=0
+        train_loader, val_loader = create_data_loaders(
+            train_dataset, val_dataset,
+            batch_size=config.batch_size,
+            num_workers=0
+        )
     
-    # Create model
+    # Create model with tokenizer
     logger.info(f"Creating model: {config.model_type}")
-    model = create_model(config, metadata['num_labels'])
+    model = create_model(config, metadata['num_labels'], tokenizer)
     
     # Log model info
     param_count = count_parameters(model) if hasattr(model, 'parameters') else 0
