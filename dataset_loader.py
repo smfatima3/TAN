@@ -2,6 +2,10 @@
 Dataset Loading and Preprocessing for Topoformer Experiments
 Supports multiple domains: Bug Localization, Scientific Papers, Legal Documents
 """
+import warnings
+warnings.filterwarnings("ignore")
+import sys
+import time
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -22,7 +26,7 @@ logger = logging.getLogger(__name__)
 class TopoformerDataset(Dataset):
     """Base dataset class for Topoformer experiments"""
     
-    def __init__(self, 
+    def __init__(self,
                  data: List[Dict],
                  tokenizer: AutoTokenizer,
                  max_length: int = 256,
@@ -68,48 +72,79 @@ class DatasetLoader:
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         
-    def load_bug_localization_dataset(self, 
+    def load_bug_localization_dataset(self,
                                      subset_size: Optional[int] = None,
                                      test_size: float = 0.2) -> Tuple[Dataset, Dataset, Dict]:
         """Load JetBrains bug localization dataset"""
         logger.info("Loading JetBrains bug localization dataset...")
-        
-        # Load dataset
-        dataset = load_dataset(
-            "(JetBrains-Research/lca-bug-localization', 'py')",
+
+        # Load the base dataset. The splits will be accessed directly.
+        dataset = load_dataset('JetBrains-Research/lca-bug-localization', 'py',
             cache_dir=self.cache_dir
         )
-        
+
         # Prepare data
         data = []
         label_map = {}
         label_counter = 0
-        
-        for item in tqdm(dataset['train'], desc="Processing bug reports"):
-            # Extract bug report text and file paths
-            text = f"{item.get('summary', '')} {item.get('description', '')}"
-            
-            # Create hierarchical label from file paths
-            for file_path in item.get('files', []):
-                if file_path not in label_map:
-                    label_map[file_path] = label_counter
-                    label_counter += 1
+
+        # Iterate over the correct splits: 'dev', 'train', 'test'
+        for split in ['dev', 'train', 'test']:
+            if split not in dataset:
+                continue
+
+            logger.info(f"Checking split: '{split}'")
+            for item in tqdm(dataset[split], desc=f"Processing bug reports from {split}"):
+                # Use the correct field name 'changed_files'
+                if not item.get('changed_files'):
+                    continue
                 
-                data.append({
-                    'text': text,
-                    'label': label_map[file_path],
-                    'file_path': file_path,
-                    'bug_id': item.get('bug_id', '')
-                })
-        
+                # Use the correct fields for text: 'issue_title' and 'issue_body'
+                text = f"{item.get('issue_title', '')} {item.get('issue_body', '')}"
+                
+                # Iterate over the 'changed_files' list
+                for file_path in item['changed_files']:
+                    if file_path not in label_map:
+                        label_map[file_path] = label_counter
+                        label_counter += 1
+                    
+                    data.append({
+                        'text': text,
+                        'label': label_map[file_path],
+                        'file_path': file_path,
+                        'bug_id': item.get('issue_url', '') # Use a more unique ID
+                    })
+
+        if not data:
+            raise ValueError(
+                "Processed data is empty even after using the correct dataset structure. "
+                "Please check the dataset content on Hugging Face."
+            )
+
         # Limit dataset size if specified
         if subset_size and len(data) > subset_size:
-            data = data[:subset_size]
-        
-        # Split into train/val
-        train_data, val_data = train_test_split(
-            data, test_size=test_size, random_state=42, stratify=[d['label'] for d in data]
-        )
+            indices = np.random.choice(range(len(data)), subset_size, replace=False)
+            data = [data[i] for i in indices]
+            
+        # We can't stratify if some classes have only one member.
+        # We will try to stratify, but fall back to a random split if it fails.
+        try:
+            train_data, val_data = train_test_split(
+                data,
+                test_size=test_size,
+                random_state=42,
+                stratify=[d['label'] for d in data]
+            )
+        except ValueError:
+            logger.warning(
+                "Stratified split failed, likely due to single-member classes. "
+                "Falling back to a random split."
+            )
+            train_data, val_data = train_test_split(
+                data,
+                test_size=test_size,
+                random_state=42
+            )
         
         # Create tokenizer
         tokenizer = AutoTokenizer.from_pretrained('microsoft/codebert-base')
@@ -208,7 +243,6 @@ class DatasetLoader:
         logger.info("Loading ArXiv papers dataset...")
         
         # For ArXiv, we'll create a classification task based on paper categories
-        # Since the bigbird model is trained on arxiv, we'll create synthetic data
         # In practice, you would load actual ArXiv data
         
         categories = [
@@ -292,7 +326,6 @@ class DatasetLoader:
             title = item.get('title', '')
             
             # Extract category from article (simplified)
-            # In practice, you'd parse actual Wikipedia categories
             if 'Science' in title or 'science' in text[:200]:
                 category = 'Science'
             elif 'History' in title or 'history' in text[:200]:
