@@ -428,6 +428,7 @@ def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> n
 
 def run_experiment(config: ExperimentConfig) -> Dict:
     """Run a single experiment"""
+    from transformers import AutoTokenizer
     # Set random seeds
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
