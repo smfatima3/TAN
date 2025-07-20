@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict
 import matplotlib.pyplot as plt
 import seaborn as sns
 from transformers import AutoTokenizer  # Added this import
-from typing import Optional
+
 # Import our modules
 from topoformer_complete import (
     TopoformerConfig, 
@@ -44,20 +44,20 @@ class ExperimentConfig:
     
     # Training settings
     batch_size: int = 16
-    learning_rate: float = 2e-6
+    learning_rate: float = 2e-5
     num_epochs: int = 10
     warmup_steps: int = 500
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     
     # Data settings
-    max_seq_length: int = 256
+    max_seq_length: int = 512  # Increased to 512 for better compatibility
     train_samples: Optional[int] = 10000
     val_samples: Optional[int] = 2000
     
     # Hardware settings
     device: str = 'cuda'
-    mixed_precision: bool = False
+    mixed_precision: bool = True
     gradient_accumulation_steps: int = 1
     
     # Experiment settings
@@ -178,9 +178,7 @@ class Trainer:
         for step, batch in enumerate(progress_bar):
             # Move batch to device
             input_ids = batch['input_ids'].to(self.device)
-            
-            attention_mask_int = batch['attention_mask'].to(self.device)
-            attention_mask = (attention_mask_int == 0)
+            attention_mask = batch['attention_mask'].to(self.device)
             labels = batch['labels'].to(self.device)
             
             # Forward pass with mixed precision
@@ -393,23 +391,35 @@ def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> n
         # Get vocab size from tokenizer if available, otherwise use default
         vocab_size = len(tokenizer) if tokenizer else 50000
         
-        topo_config = TopoformerConfig(
-            vocab_size=tokenizer.vocab_size,
-            embed_dim=config.topoformer_embed_dim,
-            num_layers=config.topoformer_layers,
-            num_heads=config.topoformer_heads,
-            k_neighbors=config.k_neighbors,
-            max_homology_dim=config.max_homology_dim,
-            max_seq_len=max(512, config.max_seq_length),  # Ensure sufficient length
-            mixed_precision=config.mixed_precision,
-            gradient_checkpointing=True
-        )
-        model = TopoformerForSequenceClassification(topo_config, num_labels)
+        # Use Fast Topoformer for better performance
+        try:
+            from topoformer_fast import create_fast_topoformer
+            logger.info("Using Fast Topoformer implementation")
+            model = create_fast_topoformer(
+                vocab_size=vocab_size,
+                num_labels=num_labels,
+                use_topology=True
+            )
+        except ImportError:
+            logger.warning("Fast Topoformer not available, using standard implementation")
+            topo_config = TopoformerConfig(
+                vocab_size=vocab_size,
+                embed_dim=config.topoformer_embed_dim,
+                num_layers=config.topoformer_layers,
+                num_heads=config.topoformer_heads,
+                k_neighbors=config.k_neighbors,
+                max_homology_dim=config.max_homology_dim,
+                max_seq_len=max(512, config.max_seq_length),
+                mixed_precision=config.mixed_precision,
+                gradient_checkpointing=True
+            )
+            model = TopoformerForSequenceClassification(topo_config, num_labels)
     else:
         baseline = create_baseline_model(config.model_type, num_labels, config.device)
         model = baseline.model
     
     return model
+
 
 def run_experiment(config: ExperimentConfig) -> Dict:
     """Run a single experiment"""
@@ -435,21 +445,22 @@ def run_experiment(config: ExperimentConfig) -> Dict:
             subset_size=config.train_samples
         )
         # Get tokenizer for vocab size
+        from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained('microsoft/codebert-base')
-    elif config.dataset_name == 'australian_legal':
-        # A standard tokenizer is fine, but a legal-specific one might be better.
-        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        train_dataset, val_dataset, metadata = loader.load_australian_legal_dataset(
-            tokenizer=tokenizer,
-            max_len=config.max_seq_length,
+    elif config.dataset_name == 'multi_eurlex':
+        train_dataset, val_dataset, metadata = loader.load_multi_eurlex_dataset(
             subset_size=config.train_samples
         )
-        tokenizer = AutoTokenizer.from_pretrained('isaacus/open-australian-legal-corpus')
+        tokenizer = AutoTokenizer.from_pretrained('bert-base-multilingual-cased')
     elif config.dataset_name == 'arxiv':
         train_dataset, val_dataset, metadata = loader.load_arxiv_papers_dataset(
             subset_size=config.train_samples
         )
-        tokenizer = AutoTokenizer.from_pretrained('common-pile/arxiv_papers')
+        # Use BERT tokenizer for ArXiv
+        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        # Update max_seq_length based on dataset metadata
+        if 'max_length' in metadata:
+            config.max_seq_length = metadata['max_length']
     elif config.dataset_name == 'wikipedia':
         train_dataset, val_dataset, metadata = loader.load_wikipedia_dataset(
             subset_size=config.train_samples
@@ -481,6 +492,8 @@ def run_experiment(config: ExperimentConfig) -> Dict:
     # Log model info
     param_count = count_parameters(model) if hasattr(model, 'parameters') else 0
     logger.info(f"Model parameters: {param_count:,}")
+    logger.info(f"Number of labels: {metadata['num_labels']}")
+    logger.info(f"Max sequence length: {config.max_seq_length}")
     
     # Create trainer
     trainer = Trainer(model, config, metadata['num_labels'], tracker)
