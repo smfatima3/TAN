@@ -40,13 +40,13 @@ class TopoformerConfig:
     """Configuration for Topoformer model"""
     vocab_size: int = 30265  # BERT vocab size
     embed_dim: int = 768
-    num_layers: int = 12
-    num_heads: int = 12
+    num_layers: int = 19 #increase
+    num_heads: int = 19  #increase
     max_seq_len: int = 512
-    dropout: float = 0.1
-    k_neighbors: int = 32
-    n_hashes: int = 16
-    hash_bits: int = 8
+    dropout: float = 0.2 #increase
+    k_neighbors: int = 45 # increasing for testing
+    n_hashes: int = 24 # increase
+    hash_bits: int = 14 #increase
     max_homology_dim: int = 2
     landscape_resolution: int = 50
     use_cuda_kernel: bool = True
