@@ -380,6 +380,10 @@ class TopoformerLayer(nn.Module):
     
     def _compute_topology_features(self, x: torch.Tensor) -> torch.Tensor:
         """Compute topology features efficiently"""
+        if torch.isnan(x).any():
+            raise ValueError("Input tensor 'x' contains NaNs!")
+
+        
         with torch.no_grad():
             neighbors, distances = self.lsh(x, self.config.k_neighbors)
             
