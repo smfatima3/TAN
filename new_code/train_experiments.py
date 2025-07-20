@@ -25,7 +25,8 @@ from transformers import AutoTokenizer  # Added this import
 # Import our modules
 from topoformer_complete import (
     TopoformerConfig, 
-    TopoformerForSequenceClassification
+    TopoformerForSequenceClassification,
+    count_parameters
 )
 from dataset_loader import DatasetLoader, create_data_loaders
 from baseline_models import create_baseline_model
