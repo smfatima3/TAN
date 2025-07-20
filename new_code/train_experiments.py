@@ -394,7 +394,7 @@ def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> n
         vocab_size = len(tokenizer) if tokenizer else 50000
         
         topo_config = TopoformerConfig(
-            vocab_size=vocab_size,
+            vocab_size=tokenizer.vocab_size,
             embed_dim=config.topoformer_embed_dim,
             num_layers=config.topoformer_layers,
             num_heads=config.topoformer_heads,
@@ -404,13 +404,12 @@ def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> n
             mixed_precision=config.mixed_precision,
             gradient_checkpointing=True
         )
-        model = TopoformerForSequenceClassification(topo_config, num_labels)
+        model = TopoformerForSequenceClassification(topo_config, num_labels=len(label_encoder.classes_))
     else:
         baseline = create_baseline_model(config.model_type, num_labels, config.device)
         model = baseline.model
     
     return model
-
 
 def run_experiment(config: ExperimentConfig) -> Dict:
     """Run a single experiment"""
