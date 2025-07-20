@@ -403,7 +403,7 @@ def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> n
             mixed_precision=config.mixed_precision,
             gradient_checkpointing=True
         )
-        model = TopoformerForSequenceClassification(topo_config, num_labels=len(label_encoder.classes_))
+        model = TopoformerForSequenceClassification(topo_config, num_labels)
     else:
         baseline = create_baseline_model(config.model_type, num_labels, config.device)
         model = baseline.model
