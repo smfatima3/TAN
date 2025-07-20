@@ -117,8 +117,10 @@ class ExperimentTracker:
             'avg_memory_gb': np.mean(self.metrics['memory_usage']) if self.metrics['memory_usage'] else 0
         }
         
-        # Save to file
+        # Create save directory if it doesn't exist
         os.makedirs(self.config.save_dir, exist_ok=True)
+        
+        # Save to file
         save_path = os.path.join(
             self.config.save_dir, 
             f"{self.config.experiment_name}_results.json"
@@ -366,6 +368,9 @@ class Trainer:
             if val_metrics['val_f1'] > best_f1:
                 best_f1 = val_metrics['val_f1']
                 best_epoch = epoch + 1
+                
+                # Create directory if it doesn't exist
+                os.makedirs(self.config.save_dir, exist_ok=True)
                 
                 # Save model
                 save_path = os.path.join(
