@@ -67,10 +67,10 @@ class ExperimentConfig:
     experiment_name: str = 'topoformer_experiment'
     
     # Topoformer specific
-    topoformer_layers: int = 6
-    topoformer_heads: int = 12
+    topoformer_layers: int = 12
+    topoformer_heads: int = 24
     topoformer_embed_dim: int = 768
-    k_neighbors: int = 32
+    k_neighbors: int = 45
     max_homology_dim: int = 2
 
 
