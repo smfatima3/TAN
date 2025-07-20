@@ -44,7 +44,7 @@ class ExperimentConfig:
     
     # Training settings
     batch_size: int = 16
-    learning_rate: float = 2e-5
+    learning_rate: float = 2e-6
     num_epochs: int = 10
     warmup_steps: int = 500
     weight_decay: float = 0.01
@@ -57,7 +57,7 @@ class ExperimentConfig:
     
     # Hardware settings
     device: str = 'cuda'
-    mixed_precision: bool = True
+    mixed_precision: bool = False
     gradient_accumulation_steps: int = 1
     
     # Experiment settings
