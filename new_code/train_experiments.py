@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict
 import matplotlib.pyplot as plt
 import seaborn as sns
 from transformers import AutoTokenizer  # Added this import
-
+from typing import Optional
 # Import our modules
 from topoformer_complete import (
     TopoformerConfig, 
@@ -40,7 +40,7 @@ class ExperimentConfig:
     """Configuration for experiments"""
     # Model settings
     model_type: str = 'topoformer'  # topoformer, bert, codebert, longformer
-    dataset_name: str = 'arxiv'  # bug_localization, multi_eurlex, arxiv, wikipedia
+    dataset_name: str = 'bug_localization'  # bug_localization, multi_eurlex, arxiv, wikipedia
     
     # Training settings
     batch_size: int = 16
