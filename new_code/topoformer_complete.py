@@ -532,7 +532,23 @@ def create_optimized_config(original_config) -> TopoformerConfig:
         mixed_precision=True,
         gradient_checkpointing=False
     )
+def count_parameters(model: nn.Module) -> int:
+    """Count trainable parameters"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+
+def count_parameters_by_type(model: nn.Module) -> Dict[str, int]:
+    """Count parameters by module type for detailed analysis"""
+    param_counts = defaultdict(int)
+    
+    for name, module in model.named_modules():
+        if hasattr(module, 'weight') and module.weight is not None:
+            module_type = type(module).__name__
+            param_counts[module_type] += module.weight.numel()
+            if hasattr(module, 'bias') and module.bias is not None:
+                param_counts[module_type] += module.bias.numel()
+    
+    return dict(param_counts)
 
 def test_topoformer():
     """Test the implementation"""
