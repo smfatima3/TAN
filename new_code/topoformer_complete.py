@@ -228,7 +228,7 @@ class FastPersistenceLandscape(nn.Module):
         
         # Learnable transformation from statistics to landscape
         self.stats_to_landscape = nn.Sequential(
-            nn.Linear(8, embed_dim // 4),  # 8 stats per dimension
+            nn.Linear(6, embed_dim // 4),  # 6 stats per dimension (4 birth/death + 2 persistence)
             nn.ReLU(),
             nn.Linear(embed_dim // 4, resolution)
         )
