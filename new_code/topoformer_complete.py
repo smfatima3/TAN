@@ -290,7 +290,7 @@ class TopologicalAttention(nn.Module):
     def forward(self, x: torch.Tensor, topo_features: torch.Tensor,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Optimized topological attention
+        Topological attention
         """
         # Standard attention
         key_padding_mask = mask == 0 if mask is not None else None
@@ -329,7 +329,7 @@ class TopoformerLayer(nn.Module):
             config.landscape_resolution, config.embed_dim
         )
         
-        self.topo_attention = OptimizedTopologicalAttention(
+        self.topo_attention = TopologicalAttention(
             config.embed_dim, config.num_heads, 
             config.landscape_resolution, config.dropout
         )
@@ -409,7 +409,7 @@ class TopoformerLayer(nn.Module):
 
 class Topoformer(nn.Module):
     """
-    Optimized Topoformer with performance improvements
+     Topoformer with performance improvements
     """
     
     def __init__(self, config: TopoformerConfig):
@@ -423,7 +423,7 @@ class Topoformer(nn.Module):
         
         # Layers
         self.layers = nn.ModuleList([
-            OptimizedTopoformerLayer(config) for _ in range(config.num_layers)
+            TopoformerLayer(config) for _ in range(config.num_layers)
         ])
         
         self.output_norm = nn.LayerNorm(config.embed_dim)
@@ -462,7 +462,7 @@ class Topoformer(nn.Module):
 
 
 class TopoformerForSequenceClassification(Topoformer):
-    """Optimized Topoformer for classification"""
+    """Topoformer for classification"""
     
     def __init__(self, config: TopoformerConfig, num_labels: int):
         super().__init__(config)
@@ -535,8 +535,8 @@ def create_optimized_config(original_config) -> TopoformerConfig:
 
 
 def test_topoformer():
-    """Test the optimized implementation"""
-    print("Testing Optimized Topoformer Implementation")
+    """Test the implementation"""
+    print("Testing Topoformer Implementation")
     print("=" * 50)
     
     # Create optimized config
@@ -585,7 +585,7 @@ def test_topoformer():
         memory_mb = torch.cuda.max_memory_allocated() / 1024**2
         print(f"Peak memory usage: {memory_mb:.2f} MB")
     
-    print("\nOptimized test completed successfully!")
+    print("\nTest completed successfully!")
     print("Expected speedup: 10-20x faster than original implementation")
 
 
