@@ -264,7 +264,7 @@ class FastPersistenceLandscape(nn.Module):
         return landscapes
 
 
-class OptimizedTopologicalAttention(nn.Module):
+class TopologicalAttention(nn.Module):
     """
     Simplified topological attention with caching
     """
@@ -310,7 +310,7 @@ class OptimizedTopologicalAttention(nn.Module):
         return output
 
 
-class OptimizedTopoformerLayer(nn.Module):
+class TopoformerLayer(nn.Module):
     """
     Highly optimized Topoformer layer with caching
     """
@@ -407,7 +407,7 @@ class OptimizedTopoformerLayer(nn.Module):
         return topo_features
 
 
-class OptimizedTopoformer(nn.Module):
+class Topoformer(nn.Module):
     """
     Optimized Topoformer with performance improvements
     """
@@ -461,7 +461,7 @@ class OptimizedTopoformer(nn.Module):
         return self.output_norm(hidden_states)
 
 
-class OptimizedTopoformerForSequenceClassification(OptimizedTopoformer):
+class TopoformerForSequenceClassification(Topoformer):
     """Optimized Topoformer for classification"""
     
     def __init__(self, config: TopoformerConfig, num_labels: int):
@@ -534,7 +534,7 @@ def create_optimized_config(original_config) -> TopoformerConfig:
     )
 
 
-def test_optimized_topoformer():
+def test_topoformer():
     """Test the optimized implementation"""
     print("Testing Optimized Topoformer Implementation")
     print("=" * 50)
@@ -543,7 +543,7 @@ def test_optimized_topoformer():
     config = create_optimized_config({})
     
     # Create model
-    model = OptimizedTopoformerForSequenceClassification(config, num_labels=2)
+    model = TopoformerForSequenceClassification(config, num_labels=2)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     
     # Test data
@@ -590,4 +590,4 @@ def test_optimized_topoformer():
 
 
 if __name__ == "__main__":
-    test_optimized_topoformer()
+    test_topoformer()
