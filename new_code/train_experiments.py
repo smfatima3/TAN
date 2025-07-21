@@ -470,6 +470,7 @@ def run_experiment(config: ExperimentConfig) -> Dict:
             subset_size=config.train_samples
         )
         # Use BERT tokenizer for ArXiv
+        from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
         # Update max_seq_length based on dataset metadata
         if 'max_length' in metadata:
