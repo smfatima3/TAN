@@ -463,7 +463,7 @@ def run_experiment(config: ExperimentConfig) -> Dict:
         train_dataset, val_dataset, metadata = loader.load_multi_eurlex_dataset(
             subset_size=config.train_samples
         )
-         from transformers import AutoTokenizer
+        from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained('bert-base-multilingual-cased')
     elif config.dataset_name == 'arxiv':
         train_dataset, val_dataset, metadata = loader.load_arxiv_papers_dataset(
