@@ -2,10 +2,6 @@
 Dataset Loading and Preprocessing for Topoformer Experiments
 Supports multiple domains: Bug Localization, Scientific Papers, Legal Documents
 """
-import warnings
-warnings.filterwarnings("ignore")
-import sys
-import time
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -19,8 +15,6 @@ import json
 import os
 from sklearn.model_selection import train_test_split
 
-
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -28,7 +22,7 @@ logger = logging.getLogger(__name__)
 class TopoformerDataset(Dataset):
     """Base dataset class for Topoformer experiments"""
     
-    def __init__(self,
+    def __init__(self, 
                  data: List[Dict],
                  tokenizer: AutoTokenizer,
                  max_length: int = 256,
@@ -74,79 +68,48 @@ class DatasetLoader:
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         
-    def load_bug_localization_dataset(self,
+    def load_bug_localization_dataset(self, 
                                      subset_size: Optional[int] = None,
                                      test_size: float = 0.2) -> Tuple[Dataset, Dataset, Dict]:
         """Load JetBrains bug localization dataset"""
         logger.info("Loading JetBrains bug localization dataset...")
-
-        # Load the base dataset. The splits will be accessed directly.
-        dataset = load_dataset('JetBrains-Research/lca-bug-localization', 'py',
+        
+        # Load dataset
+        dataset = load_dataset(
+            "JetBrains-Research/lca-bug-localization",
             cache_dir=self.cache_dir
         )
-
+        
         # Prepare data
         data = []
         label_map = {}
         label_counter = 0
-
-        # Iterate over the correct splits: 'dev', 'train', 'test'
-        for split in ['dev', 'train', 'test']:
-            if split not in dataset:
-                continue
-
-            logger.info(f"Checking split: '{split}'")
-            for item in tqdm(dataset[split], desc=f"Processing bug reports from {split}"):
-                # Use the correct field name 'changed_files'
-                if not item.get('changed_files'):
-                    continue
+        
+        for item in tqdm(dataset['train'], desc="Processing bug reports"):
+            # Extract bug report text and file paths
+            text = f"{item.get('summary', '')} {item.get('description', '')}"
+            
+            # Create hierarchical label from file paths
+            for file_path in item.get('files', []):
+                if file_path not in label_map:
+                    label_map[file_path] = label_counter
+                    label_counter += 1
                 
-                # Use the correct fields for text: 'issue_title' and 'issue_body'
-                text = f"{item.get('issue_title', '')} {item.get('issue_body', '')}"
-                
-                # Iterate over the 'changed_files' list
-                for file_path in item['changed_files']:
-                    if file_path not in label_map:
-                        label_map[file_path] = label_counter
-                        label_counter += 1
-                    
-                    data.append({
-                        'text': text,
-                        'label': label_map[file_path],
-                        'file_path': file_path,
-                        'bug_id': item.get('issue_url', '') # Use a more unique ID
-                    })
-
-        if not data:
-            raise ValueError(
-                "Processed data is empty even after using the correct dataset structure. "
-                "Please check the dataset content on Hugging Face."
-            )
-
+                data.append({
+                    'text': text,
+                    'label': label_map[file_path],
+                    'file_path': file_path,
+                    'bug_id': item.get('bug_id', '')
+                })
+        
         # Limit dataset size if specified
         if subset_size and len(data) > subset_size:
-            indices = np.random.choice(range(len(data)), subset_size, replace=False)
-            data = [data[i] for i in indices]
-            
-        # We can't stratify if some classes have only one member.
-        # We will try to stratify, but fall back to a random split if it fails.
-        try:
-            train_data, val_data = train_test_split(
-                data,
-                test_size=test_size,
-                random_state=42,
-                stratify=[d['label'] for d in data]
-            )
-        except ValueError:
-            logger.warning(
-                "Stratified split failed, likely due to single-member classes. "
-                "Falling back to a random split."
-            )
-            train_data, val_data = train_test_split(
-                data,
-                test_size=test_size,
-                random_state=42
-            )
+            data = data[:subset_size]
+        
+        # Split into train/val
+        train_data, val_data = train_test_split(
+            data, test_size=test_size, random_state=42, stratify=[d['label'] for d in data]
+        )
         
         # Create tokenizer
         tokenizer = AutoTokenizer.from_pretrained('microsoft/codebert-base')
@@ -167,77 +130,77 @@ class DatasetLoader:
         logger.info(f"Number of unique file paths (labels): {len(label_map)}")
         
         return train_dataset, val_dataset, metadata
-
-    def load_australian_legal_dataset(
-        self,
-        tokenizer,
-        max_len: int = 512,
-        subset_size: Optional[int] = None,
-        test_size: float = 0.2
-    ) -> Tuple[Dataset, Dataset, Dict]:
-        """
-        Load the Australian Legal Corpus and prepare it for classifying
-        documents by their 'jurisdiction'.
-        """
-        logger.info("Loading 'isaacus/open-australian-legal-corpus' for jurisdiction classification...")
     
+    def load_multi_eurlex_dataset(self,
+                                 language_pair: str = 'en',
+                                 subset_size: Optional[int] = None,
+                                 test_size: float = 0.2) -> Tuple[Dataset, Dataset, Dict]:
+        """Load Multi-EURLEX legal document dataset"""
+        logger.info(f"Loading Multi-EURLEX dataset for {language_pair}...")
+        
+        # Load dataset
         dataset = load_dataset(
-            "isaacus/open-australian-legal-corpus",
-            split='corpus',
+            "multi_eurlex",
+            language_pair,
             cache_dir=self.cache_dir
         )
-    
-        # This filter correctly ensures each document has BOTH text and a label.
-        # Changing 'and' to 'or' here will cause errors later.
-        filtered_data = [
-            item for item in tqdm(dataset, desc="Filtering data")
-            if item.get('decision') and item.get('jurisdiction')
-        ]
-    
-        # Check if any data remains after filtering
-        if not filtered_data:
-            raise ValueError("No data remained after filtering for 'decision' and 'jurisdiction'.")
-    
-        if subset_size:
-            filtered_data = filtered_data[:subset_size]
-    
-        # Build a simple label vocabulary from the unique jurisdictions
-        unique_labels = sorted(list(set(item['jurisdiction'] for item in filtered_data)))
-        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-        num_labels = len(label_to_idx)
-        logger.info(f"Found {num_labels} unique jurisdictions to use as labels.")
-    
-        # Prepare the final data for single-label classification
-        processed_data = []
-        for item in tqdm(filtered_data, desc="Processing documents"):
-            processed_data.append({
-                'text': item['decision'],
-                'labels': label_to_idx[item['jurisdiction']],  # Assign the integer ID for the jurisdiction
+        
+        # Prepare data with hierarchical labels
+        data = []
+        all_labels = set()
+        
+        for item in tqdm(dataset['train'], desc="Processing legal documents"):
+            text = item['text']
+            labels = item['labels']  # Multi-label classification
+            
+            # Convert to binary vector
+            all_labels.update(labels)
+            
+            data.append({
+                'text': text,
+                'labels': labels,
+                'celex_id': item.get('celex_id', '')
             })
-    
-        # Split the data
+        
+        # Create label mapping
+        label_to_idx = {label: idx for idx, label in enumerate(sorted(all_labels))}
+        
+        # Convert labels to binary vectors
+        for item in data:
+            label_vector = [0] * len(label_to_idx)
+            for label in item['labels']:
+                label_vector[label_to_idx[label]] = 1
+            item['labels'] = label_vector
+        
+        # Limit dataset size
+        if subset_size and len(data) > subset_size:
+            data = data[:subset_size]
+        
+        # Split data
         train_data, val_data = train_test_split(
-            processed_data, test_size=test_size, random_state=42,
-            stratify=[d['labels'] for d in processed_data] # Stratify to balance labels in splits
+            data, test_size=test_size, random_state=42
         )
-    
-        # Create PyTorch Datasets
-        train_dataset = TopoformerDataset(train_data, tokenizer, max_len=max_len, task_type='single_label')
-        val_dataset = TopoformerDataset(val_data, tokenizer, max_len=max_len, task_type='single_label')
-    
-        # Prepare metadata
+        
+        # Create tokenizer
+        tokenizer = AutoTokenizer.from_pretrained('bert-base-multilingual-cased')
+        
+        # Create datasets
+        train_dataset = TopoformerDataset(train_data, tokenizer, task_type='multi_label')
+        val_dataset = TopoformerDataset(val_data, tokenizer, task_type='multi_label')
+        
         metadata = {
-            'num_labels': num_labels,
+            'num_labels': len(label_to_idx),
             'label_map': label_to_idx,
-            'task_type': 'single_label_classification',
+            'task_type': 'multi_label_classification',
             'train_size': len(train_data),
             'val_size': len(val_data)
         }
-    
-        logger.info(f"Loaded {len(train_data)} train and {len(val_data)} val samples.")
+        
+        logger.info(f"Loaded {len(train_data)} train and {len(val_data)} val samples")
+        logger.info(f"Number of unique labels: {len(label_to_idx)}")
+        
         return train_dataset, val_dataset, metadata
-
-
+    
     def load_arxiv_papers_dataset(self,
                                  subset_size: Optional[int] = None,
                                  test_size: float = 0.2) -> Tuple[Dataset, Dataset, Dict]:
@@ -245,6 +208,7 @@ class DatasetLoader:
         logger.info("Loading ArXiv papers dataset...")
         
         # For ArXiv, we'll create a classification task based on paper categories
+        # Since the bigbird model is trained on arxiv, we'll create synthetic data
         # In practice, you would load actual ArXiv data
         
         categories = [
@@ -328,6 +292,7 @@ class DatasetLoader:
             title = item.get('title', '')
             
             # Extract category from article (simplified)
+            # In practice, you'd parse actual Wikipedia categories
             if 'Science' in title or 'science' in text[:200]:
                 category = 'Science'
             elif 'History' in title or 'history' in text[:200]:
@@ -431,9 +396,9 @@ def test_dataset_loading():
     except Exception as e:
         print(f"✗ Bug localization failed: {e}")
     
-    print("\n2. Testing australian_legal Dataset (100 samples)")
+    print("\n2. Testing Multi-EURLEX Dataset (100 samples)")
     try:
-        train_dataset, val_dataset, metadata = loader.load_australian_legal_dataset(
+        train_dataset, val_dataset, metadata = loader.load_multi_eurlex_dataset(
             subset_size=100
         )
         print(f"✓ Multi-EURLEX: {metadata['train_size']} train, {metadata['val_size']} val")
