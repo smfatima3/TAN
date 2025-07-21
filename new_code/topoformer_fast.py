@@ -14,7 +14,7 @@ from dataclasses import dataclass
 @dataclass
 class FastTopoformerConfig:
     """Configuration for Fast Topoformer"""
-    vocab_size: int = 30265
+    vocab_size: int = 30522  # BERT default vocab size
     embed_dim: int = 768
     num_layers: int = 6
     num_heads: int = 12
