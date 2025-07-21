@@ -209,40 +209,50 @@ CODE:
         
         return title, description, code
     
-    def generate_bug_with_templates(self, bug_type: str, component: str, 
-                                   sub_component: str, language: str) -> Tuple[str, str, str]:
+    class BugGenerator:
+    def __init__(self):
+        self.bug_templates = {
+            'Logic Error': ['Logic Error in {function}: {symptom} in {class}'],
+            'Performance Issue': ['Performance bottleneck in {method} within {class}']
+        }
+
+    def generate_bug_with_templates(self, bug_type: str, component: str,
+                                  sub_component: str, language: str) -> Tuple[str, str, str]:
         """Generate bug details using templates"""
         # Select template
         templates = self.bug_templates.get(bug_type, self.bug_templates['Logic Error'])
         template = random.choice(templates)
-        
-        # Fill template
-        title = template.format(
-            function=f"{sub_component.lower().replace(' ', '_')}_handler",
-            component=component,
-            condition="invalid input parameters",
-            edge_case="empty array",
-            symptom="data corruption",
-            class=f"{component}Service",
-            method="processData",
-            line=random.randint(10, 500),
-            time=random.randint(100, 5000),
-            operation="bulk update",
-            data_type="large JSON objects",
-            reason="inefficient algorithm",
-            param="user_id",
-            data="user comments",
-            endpoint=f"/api/{component.lower()}",
-            attack="unauthorized access",
-            thread1="worker-1",
-            thread2="worker-2"
-        )
-        
+
+        # Create a dictionary for template values to avoid keyword conflict
+        format_args = {
+            'function': f"{sub_component.lower().replace(' ', '_')}_handler",
+            'component': component,
+            'condition': "invalid input parameters",
+            'edge_case': "empty array",
+            'symptom': "data corruption",
+            'class': f"{component}Service",  # Use 'class' as a string key
+            'method': "processData",
+            'line': random.randint(10, 500),
+            'time': random.randint(100, 5000),
+            'operation': "bulk update",
+            'data_type': "large JSON objects",
+            'reason': "inefficient algorithm",
+            'param': "user_id",
+            'data': "user comments",
+            'endpoint': f"/api/{component.lower()}",
+            'attack': "unauthorized access",
+            'thread1': "worker-1",
+            'thread2': "worker-2"
+        }
+
+        # Fill template using dictionary unpacking (**)
+        title = template.format(**format_args)
+
         # Generate description
         description = f"This {bug_type.lower()} occurs in the {component} component, specifically in the {sub_component} module. "
         description += f"The issue manifests when the system processes {random.choice(['user input', 'batch data', 'concurrent requests', 'edge cases'])}. "
         description += f"This bug has been classified as {random.choice(['intermittent', 'consistent', 'environment-specific', 'data-dependent'])}."
-        
+
         # Generate code snippet
         if language == 'Python':
             code = f"""
@@ -250,7 +260,7 @@ def {sub_component.lower().replace(' ', '_')}_handler(data):
     # BUG: {bug_type} occurs here
     if not data:  # Missing proper validation
         return None
-    
+
     result = process_data(data)
     # Missing error handling
     return result['value']  # Potential KeyError
@@ -262,13 +272,13 @@ function handle{sub_component.replace(' ', '')}(data) {{
     const result = data.map(item => {{
         return item.value * 2;  // Assumes 'value' exists
     }});
-    
+
     return result;  // No null checks
 }}
 """
         else:
             code = f"// {language} code snippet showing {bug_type}"
-        
+
         return title, description, code.strip()
     
     def generate_file_path(self, component: str, sub_component: str, 
