@@ -217,26 +217,31 @@ CODE:
         template = random.choice(templates)
         
         # Fill template
-        title = template.format(
-            function=f"{sub_component.lower().replace(' ', '_')}_handler",
-            component=component,
-            condition="invalid input parameters",
-            edge_case="empty array",
-            symptom="data corruption",
-            class=f"{component}Service",
-            method="processData",
-            line=random.randint(10, 500),
-            time=random.randint(100, 5000),
-            operation="bulk update",
-            data_type="large JSON objects",
-            reason="inefficient algorithm",
-            param="user_id",
-            data="user comments",
-            endpoint=f"/api/{component.lower()}",
-            attack="unauthorized access",
-            thread1="worker-1",
-            thread2="worker-2"
-        )
+        template_vars = {
+            'function': f"{sub_component.lower().replace(' ', '_')}_handler",
+            'component': component,
+            'condition': "invalid input parameters",
+            'edge_case': "empty array",
+            'symptom': "data corruption",
+            'class': f"{component}Service",
+            'method': "processData",
+            'line': random.randint(10, 500),
+            'time': random.randint(100, 5000),
+            'operation': "bulk update",
+            'data_type': "large JSON objects",
+            'reason': "inefficient algorithm",
+            'param': "user_id",
+            'data': "user comments",
+            'endpoint': f"/api/{component.lower()}",
+            'attack': "unauthorized access",
+            'thread1': "worker-1",
+            'thread2': "worker-2"
+        }
+        
+        # Use the template_vars dict to format the template
+        title = template
+        for key, value in template_vars.items():
+            title = title.replace(f"{{{key}}}", str(value))
         
         # Generate description
         description = f"This {bug_type.lower()} occurs in the {component} component, specifically in the {sub_component} module. "
