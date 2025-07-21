@@ -1,6 +1,6 @@
 """
-Streamlined Topoformer Implementation
-Optimized for notebook execution with synthetic bug dataset
+Fixed Streamlined Topoformer Implementation
+Handles mixed precision training properly
 """
 
 import torch
@@ -72,14 +72,15 @@ class SimplifiedTopologyExtractor(nn.Module):
         distances = torch.cdist(topo_proj, topo_proj, p=2)  # [batch, seq_len, seq_len]
         
         # Get k-nearest neighbors
-        _, indices = torch.topk(distances, self.k_neighbors, dim=-1, largest=False)
+        k = min(self.k_neighbors, seq_len)  # Handle case where seq_len < k_neighbors
+        _, indices = torch.topk(distances, k, dim=-1, largest=False)
         
         # Aggregate neighbor features
         neighbor_features = torch.gather(
             embeddings.unsqueeze(2).expand(-1, -1, seq_len, -1),
             2,
             indices.unsqueeze(-1).expand(-1, -1, -1, self.embed_dim)
-        )  # [batch, seq_len, k_neighbors, embed_dim]
+        )  # [batch, seq_len, k, embed_dim]
         
         # Mean pooling over neighbors
         pooled_features = neighbor_features.mean(dim=2)  # [batch, seq_len, embed_dim]
@@ -130,7 +131,11 @@ class TopologicalAttention(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2) == 0, -1e9)
+            # Convert to float32 for numerical stability
+            scores = scores.float()
+            mask_value = -1e4 if x.dtype == torch.float16 else -1e9
+            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2) == 0, mask_value)
+            scores = scores.to(x.dtype)
         
         attn_probs = F.softmax(scores, dim=-1)
         attn_probs = self.dropout(attn_probs)
@@ -311,10 +316,11 @@ class TopoformerForBugClassification(nn.Module):
         if labels is not None:
             loss_fn = nn.CrossEntropyLoss()
             
-            component_loss = loss_fn(component_logits, labels['component'])
-            subcomponent_loss = loss_fn(subcomponent_logits, labels['sub_component'])
-            bugtype_loss = loss_fn(bugtype_logits, labels['bug_type'])
-            severity_loss = loss_fn(severity_logits, labels['severity'])
+            # Convert logits to float32 for loss computation
+            component_loss = loss_fn(component_logits.float(), labels['component'])
+            subcomponent_loss = loss_fn(subcomponent_logits.float(), labels['sub_component'])
+            bugtype_loss = loss_fn(bugtype_logits.float(), labels['bug_type'])
+            severity_loss = loss_fn(severity_logits.float(), labels['severity'])
             
             # Weighted combination of losses
             total_loss = (
