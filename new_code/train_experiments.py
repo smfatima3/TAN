@@ -40,7 +40,7 @@ class ExperimentConfig:
     """Configuration for experiments"""
     # Model settings
     model_type: str = 'topoformer'  # topoformer, bert, codebert, longformer
-    dataset_name: str = 'bug_localization'  # bug_localization, multi_eurlex, arxiv, wikipedia
+    dataset_name: str = 'arxiv'  # bug_localization, multi_eurlex, arxiv, wikipedia
     
     # Training settings
     batch_size: int = 16
@@ -67,10 +67,10 @@ class ExperimentConfig:
     experiment_name: str = 'topoformer_experiment'
     
     # Topoformer specific
-    topoformer_layers: int = 12
-    topoformer_heads: int = 24
+    topoformer_layers: int = 6
+    topoformer_heads: int = 12
     topoformer_embed_dim: int = 768
-    k_neighbors: int = 45
+    k_neighbors: int = 32
     max_homology_dim: int = 2
 
 
@@ -389,12 +389,19 @@ class Trainer:
         }
 
 
-def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> nn.Module:
+def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None, vocab_size=None) -> nn.Module:
     """Create model based on configuration"""
     
     if config.model_type == 'topoformer':
-        # Get vocab size from tokenizer if available, otherwise use default
-        vocab_size = len(tokenizer) if tokenizer else 50000
+        # Get vocab size from tokenizer or metadata
+        if vocab_size:
+            vocab_size = vocab_size
+        elif tokenizer:
+            vocab_size = len(tokenizer)
+        else:
+            vocab_size = 30522  # BERT default vocab size
+            
+        logger.info(f"Creating Topoformer with vocab_size={vocab_size}, num_labels={num_labels}")
         
         # Use Fast Topoformer for better performance
         try:
@@ -428,7 +435,6 @@ def create_model(config: ExperimentConfig, num_labels: int, tokenizer=None) -> n
 
 def run_experiment(config: ExperimentConfig) -> Dict:
     """Run a single experiment"""
-    from transformers import AutoTokenizer
     # Set random seeds
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -493,7 +499,8 @@ def run_experiment(config: ExperimentConfig) -> Dict:
     
     # Create model with tokenizer
     logger.info(f"Creating model: {config.model_type}")
-    model = create_model(config, metadata['num_labels'], tokenizer)
+    vocab_size = metadata.get('vocab_size', None)
+    model = create_model(config, metadata['num_labels'], tokenizer, vocab_size)
     
     # Log model info
     param_count = count_parameters(model) if hasattr(model, 'parameters') else 0
