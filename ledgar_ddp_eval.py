@@ -1144,8 +1144,7 @@ class ComprehensiveDDPExperiment:
         if dist.is_initialized():
             dist.barrier()
         
-        # Sparse attention
-        self.run_neural_model(LongformerForLEDGAR, "Longformer")
+        # Sparse attention self.run_neural_model(LongformerForLEDGAR, "Longformer")
         self.run_neural_model(BigBirdForLEDGAR, "BigBird")
         
         # Recent models
