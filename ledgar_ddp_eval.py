@@ -1148,7 +1148,7 @@ class ComprehensiveExperiment:
         self.run_tfidf_svm()
         
         # Sparse attention
-        self.run_neural_model(LongformerForLEDGAR, "Longformer")
+       # self.run_neural_model(LongformerForLEDGAR, "Longformer")
         
         # Recent models
         self.run_neural_model(MambaForLEDGAR, "Mamba", {'n_layer': 12})
