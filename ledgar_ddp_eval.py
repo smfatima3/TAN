@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Comprehensive LEDGAR Evaluation with Distributed Data Parallel (2 GPUs)
-Models: TAN, TFIDF-SVM, Longformer, BigBird, Mamba, RetNet, YOCO (No Hyena)
-GPU Memory: 2x15GB = 30GB total using DDP
+LEDGAR Evaluation with Model Parallelism (2 GPUs)
+Combines GPU memory: GPU0 (15GB) + GPU1 (15GB) = 30GB total
 
-Usage:
-    Single GPU: python ledgar_ddp_eval.py
-    Multi-GPU:  torchrun --nproc_per_node=2 ledgar_ddp_eval.py
+Model Parallelism: Splits model layers across GPUs
+- First half of layers on GPU:0
+- Second half of layers on GPU:1
+
+Models: TAN, TFIDF-SVM, Longformer, Mamba, RetNet, YOCO (No BigBird, No Hyena)
 """
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
     get_linear_schedule_with_warmup,
-    LongformerModel, LongformerConfig,
-    BigBirdModel, BigBirdConfig
+    LongformerModel, LongformerConfig
 )
 
 import numpy as np
@@ -40,94 +38,84 @@ from typing import Optional, Dict, List, Tuple, Any
 import warnings
 warnings.filterwarnings('ignore')
 
-# ML libraries
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC
 from sklearn.metrics import f1_score, accuracy_score
 from scipy import stats
 
-# Dataset
 from datasets import load_dataset
 
-# ====================== DDP SETUP ======================
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('ledgar_model_parallel.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-def setup_ddp():
-    """Initialize distributed training"""
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        
-        dist.init_process_group(backend='nccl')
-        torch.cuda.set_device(local_rank)
-        
-        return rank, world_size, local_rank
-    else:
-        # Single GPU mode
-        return 0, 1, 0
+# ====================== GPU SETUP ======================
 
-def cleanup_ddp():
-    """Cleanup distributed training"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-def is_main_process():
-    """Check if current process is main"""
-    return not dist.is_initialized() or dist.get_rank() == 0
-
-# Setup logging (only main process)
-def setup_logging():
-    if is_main_process():
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('ledgar_ddp_eval.log'),
-                logging.StreamHandler()
-            ]
-        )
-    else:
-        logging.basicConfig(level=logging.WARNING)
+def check_gpus():
+    """Check available GPUs"""
+    if not torch.cuda.is_available():
+        logger.error("CUDA not available!")
+        return None, None
     
-    return logging.getLogger(__name__)
+    num_gpus = torch.cuda.device_count()
+    if num_gpus < 2:
+        logger.warning(f"Only {num_gpus} GPU(s) available. Model parallelism needs 2 GPUs.")
+        logger.warning("Will use single GPU mode.")
+        return 'cuda:0', None
+    
+    gpu0_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    gpu1_mem = torch.cuda.get_device_properties(1).total_memory / 1024**3
+    
+    logger.info(f"GPU 0: {gpu0_mem:.1f} GB")
+    logger.info(f"GPU 1: {gpu1_mem:.1f} GB")
+    logger.info(f"Total available: {gpu0_mem + gpu1_mem:.1f} GB")
+    
+    return 'cuda:0', 'cuda:1'
+
+DEVICE_0, DEVICE_1 = check_gpus()
+USE_MODEL_PARALLEL = DEVICE_1 is not None
 
 # ====================== CONFIGURATION ======================
 
 @dataclass
 class ExperimentConfig:
-    """Experiment configuration for DDP"""
-    # Data parameters
-    max_train_samples: Optional[int] = None  # None = all 60K
+    """Experiment configuration"""
+    max_train_samples: Optional[int] = None
     max_val_samples: Optional[int] = None
     max_test_samples: Optional[int] = None
     max_seq_length: int = 512
     
-    # Training parameters
-    batch_size: int = 16  # Per GPU (total = 16*2 = 32)
+    # Reduced batch size for memory
+    batch_size: int = 8  # Smaller for safety
     num_epochs: int = 20
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
     gradient_clip: float = 1.0
     
-    # Evaluation
-    eval_batch_size: int = 32  # Per GPU
+    # Gradient checkpointing to save memory
+    use_gradient_checkpointing: bool = True
     
-    # Efficiency measurement
+    eval_batch_size: int = 16
+    
     measure_runtime: bool = True
     measure_memory: bool = True
     num_timing_runs: int = 100
     
-    # Statistical analysis
     num_bootstrap_samples: int = 1000
     confidence_level: float = 0.95
     
-    # DDP settings
-    num_workers: int = 4
+    num_workers: int = 2  # Reduced
     pin_memory: bool = True
     
-    # Output
-    output_dir: str = './ledgar_ddp_results'
+    output_dir: str = './ledgar_model_parallel_results'
     save_predictions: bool = True
 
 # ====================== LEDGAR DATASET ======================
@@ -155,7 +143,7 @@ LEDGAR_CLASSES = [
 ]
 
 class LEDGARDataset(Dataset):
-    """LEDGAR dataset (100 classes)"""
+    """LEDGAR dataset without trust_remote_code"""
     
     def __init__(self, split: str, tokenizer=None, max_length: int = 512,
                  max_samples: Optional[int] = None, for_sklearn: bool = False):
@@ -164,10 +152,17 @@ class LEDGARDataset(Dataset):
         self.max_length = max_length
         self.for_sklearn = for_sklearn
         
-        if is_main_process():
-            logger.info(f"Loading LEDGAR {split} split...")
+        logger.info(f"Loading LEDGAR {split} split...")
         
-        dataset = load_dataset("coastalcph/lex_glue", "ledgar", split=split, trust_remote_code=True)
+        # Load without trust_remote_code (deprecated)
+        try:
+            dataset = load_dataset("coastalcph/lex_glue", "ledgar", split=split)
+        except Exception as e:
+            logger.error(f"Failed to load dataset: {e}")
+            logger.info("Trying alternative loading method...")
+            # Alternative: load full dataset then select split
+            dataset = load_dataset("coastalcph/lex_glue", "ledgar")
+            dataset = dataset[split]
         
         if max_samples and len(dataset) > max_samples:
             indices = np.random.choice(len(dataset), max_samples, replace=False)
@@ -177,7 +172,7 @@ class LEDGARDataset(Dataset):
         self.texts = []
         self.labels_list = []
         
-        for item in tqdm(dataset, desc=f"Processing {split}", disable=not is_main_process()):
+        for item in tqdm(dataset, desc=f"Processing {split}"):
             text = item.get('text', '')
             label = item['label']
             
@@ -202,8 +197,7 @@ class LEDGARDataset(Dataset):
                     'labels': torch.tensor(label, dtype=torch.long)
                 })
         
-        if is_main_process():
-            logger.info(f"{split}: {len(self.texts)} samples")
+        logger.info(f"{split}: {len(self.texts)} samples")
     
     def __len__(self):
         return len(self.texts) if self.for_sklearn else len(self.data)
@@ -216,7 +210,7 @@ class LEDGARDataset(Dataset):
     def get_texts_and_labels(self):
         return self.texts, self.labels_list
 
-# ====================== TAN IMPLEMENTATION ======================
+# ====================== MODEL PARALLEL TAN ======================
 
 @dataclass
 class TANConfig:
@@ -235,6 +229,11 @@ class TANConfig:
     hash_bits: int = 64
     lsh_temperature: float = 0.1
     multi_scale_k: List[int] = field(default_factory=lambda: [8, 16, 32, 64] * 3)
+    
+    # Model parallelism
+    use_model_parallel: bool = USE_MODEL_PARALLEL
+    device_0: str = DEVICE_0
+    device_1: Optional[str] = DEVICE_1
 
 class TopologicalFeatureExtractor(nn.Module):
     def __init__(self, embed_dim: int, k_neighbors: int, topology_dim: int):
@@ -263,7 +262,7 @@ class TopologicalFeatureExtractor(nn.Module):
         similarity = torch.matmul(embeddings_norm, embeddings_norm.transpose(-2, -1))
         distances = 1 - similarity
         
-        mask = torch.eye(seq_len, device=distances.device).unsqueeze(0).expand(batch_size, -1, -1)
+        mask = torch.eye(seq_len, device=embeddings.device).unsqueeze(0).expand(batch_size, -1, -1)
         distances = distances.masked_fill(mask.bool(), float('inf'))
         
         k = min(self.k_neighbors, seq_len - 1)
@@ -368,6 +367,7 @@ class TopologicalAttention(nn.Module):
                 topology_features: Optional[Dict[str, torch.Tensor]] = None,
                 attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
+        device = hidden_states.device
         
         queries = self.q_proj(hidden_states)
         keys = self.k_proj(hidden_states)
@@ -454,18 +454,45 @@ class TANLayer(nn.Module):
         
         return hidden_states
 
-class TAN(nn.Module):
+class ModelParallelTAN(nn.Module):
+    """TAN with Model Parallelism across 2 GPUs"""
+    
     def __init__(self, config: TANConfig):
         super().__init__()
         self.config = config
+        self.use_model_parallel = config.use_model_parallel
         
-        self.embeddings = nn.Embedding(config.vocab_size, config.embed_dim)
-        self.position_embeddings = nn.Embedding(config.max_seq_length, config.embed_dim)
-        self.embedding_dropout = nn.Dropout(config.dropout)
-        self.embedding_norm = nn.LayerNorm(config.embed_dim)
+        # Embeddings on GPU 0
+        self.embeddings = nn.Embedding(config.vocab_size, config.embed_dim).to(config.device_0)
+        self.position_embeddings = nn.Embedding(config.max_seq_length, config.embed_dim).to(config.device_0)
+        self.embedding_dropout = nn.Dropout(config.dropout).to(config.device_0)
+        self.embedding_norm = nn.LayerNorm(config.embed_dim).to(config.device_0)
         
-        self.layers = nn.ModuleList([TANLayer(config) for _ in range(config.num_layers)])
-        self.final_norm = nn.LayerNorm(config.embed_dim)
+        # Split layers across GPUs
+        if self.use_model_parallel:
+            split_point = config.num_layers // 2
+            
+            # First half on GPU 0
+            self.layers_gpu0 = nn.ModuleList([
+                TANLayer(config) for _ in range(split_point)
+            ]).to(config.device_0)
+            
+            # Second half on GPU 1
+            self.layers_gpu1 = nn.ModuleList([
+                TANLayer(config) for _ in range(config.num_layers - split_point)
+            ]).to(config.device_1)
+            
+            logger.info(f"Model Parallelism: {split_point} layers on {config.device_0}, "
+                       f"{config.num_layers - split_point} layers on {config.device_1}")
+        else:
+            # All layers on single GPU
+            self.layers = nn.ModuleList([
+                TANLayer(config) for _ in range(config.num_layers)
+            ]).to(config.device_0)
+        
+        # Final norm - put on last device
+        final_device = config.device_1 if self.use_model_parallel else config.device_0
+        self.final_norm = nn.LayerNorm(config.embed_dim).to(final_device)
         
         self.apply(self._init_weights)
     
@@ -483,10 +510,15 @@ class TAN(nn.Module):
     def forward(self, input_ids: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         batch_size, seq_length = input_ids.shape
-        device = input_ids.device
         
-        position_ids = torch.arange(seq_length, device=device).unsqueeze(0).expand(batch_size, -1)
+        # Ensure inputs on GPU 0
+        input_ids = input_ids.to(self.config.device_0)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.config.device_0)
         
+        position_ids = torch.arange(seq_length, device=self.config.device_0).unsqueeze(0).expand(batch_size, -1)
+        
+        # Embeddings on GPU 0
         token_embeddings = self.embeddings(input_ids)
         position_embeddings = self.position_embeddings(position_ids)
         
@@ -494,34 +526,59 @@ class TAN(nn.Module):
         hidden_states = self.embedding_norm(hidden_states)
         hidden_states = self.embedding_dropout(hidden_states)
         
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, attention_mask)
+        # Pass through layers
+        if self.use_model_parallel:
+            # First half on GPU 0
+            for layer in self.layers_gpu0:
+                hidden_states = layer(hidden_states, attention_mask)
+            
+            # Move to GPU 1
+            hidden_states = hidden_states.to(self.config.device_1)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(self.config.device_1)
+            
+            # Second half on GPU 1
+            for layer in self.layers_gpu1:
+                hidden_states = layer(hidden_states, attention_mask)
+        else:
+            # All on single GPU
+            for layer in self.layers:
+                hidden_states = layer(hidden_states, attention_mask)
         
+        # Final norm
         hidden_states = self.final_norm(hidden_states)
         
         return {'hidden_states': hidden_states}
 
-class TANForLegalClassification(nn.Module):
+class ModelParallelTANForLegalClassification(nn.Module):
+    """TAN with Model Parallelism for classification"""
+    
     def __init__(self, config: TANConfig, num_labels: int = 100):
         super().__init__()
         self.config = config
         self.num_labels = num_labels
-        self.tan = TAN(config)
+        self.tan = ModelParallelTAN(config)
+        
+        # Classifier on final device
+        final_device = config.device_1 if config.use_model_parallel else config.device_0
         
         self.pooler = nn.Sequential(
             nn.Linear(config.embed_dim, config.embed_dim),
             nn.Tanh(),
             nn.Dropout(config.dropout)
-        )
+        ).to(final_device)
         
         self.classifier = nn.Sequential(
             nn.Linear(config.embed_dim, config.embed_dim // 2),
             nn.ReLU(),
             nn.Dropout(config.dropout),
             nn.Linear(config.embed_dim // 2, num_labels)
-        )
+        ).to(final_device)
         
         self.name = "TAN"
+        
+        total_params = sum(p.numel() for p in self.parameters()) / 1e6
+        logger.info(f"TAN initialized with {total_params:.1f}M parameters")
     
     def forward(self, input_ids: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None,
@@ -529,7 +586,9 @@ class TANForLegalClassification(nn.Module):
         outputs = self.tan(input_ids, attention_mask)
         hidden_states = outputs['hidden_states']
         
+        # Pooling
         if attention_mask is not None:
+            attention_mask = attention_mask.to(hidden_states.device)
             mask_expanded = attention_mask.unsqueeze(-1).float()
             sum_embeddings = (hidden_states * mask_expanded).sum(1)
             sum_mask = mask_expanded.sum(1).clamp(min=1e-9)
@@ -542,6 +601,7 @@ class TANForLegalClassification(nn.Module):
         
         loss = None
         if labels is not None:
+            labels = labels.to(logits.device)
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits, labels)
         
@@ -585,9 +645,12 @@ class TFIDF_SVM:
         params = n_features * 100
         return {'total_params': params, 'total_params_M': params / 1e6}
 
+# Longformer - will use single GPU (pretrained too large to split easily)
 class LongformerForLEDGAR(nn.Module):
     def __init__(self, num_labels=100, max_length=512):
         super().__init__()
+        
+        logger.info("Loading Longformer (will use single GPU)")
         config = LongformerConfig.from_pretrained('allenai/longformer-base-4096')
         config.num_labels = num_labels
         config.attention_window = [128] * config.num_hidden_layers
@@ -596,6 +659,9 @@ class LongformerForLEDGAR(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self.classifier = nn.Linear(config.hidden_size, num_labels)
         self.name = "Longformer"
+        
+        # Single GPU
+        self.to(DEVICE_0)
     
     def forward(self, input_ids, attention_mask=None, labels=None):
         global_attention_mask = torch.zeros_like(input_ids)
@@ -617,32 +683,7 @@ class LongformerForLEDGAR(nn.Module):
         
         return {'loss': loss, 'logits': logits}
 
-class BigBirdForLEDGAR(nn.Module):
-    def __init__(self, num_labels=100, max_length=512):
-        super().__init__()
-        config = BigBirdConfig.from_pretrained('google/bigbird-roberta-base')
-        config.num_labels = num_labels
-        config.attention_type = "block_sparse"
-        config.block_size = 64
-        config.num_random_blocks = 3
-        
-        self.bigbird = BigBirdModel.from_pretrained('google/bigbird-roberta-base', config=config)
-        self.dropout = nn.Dropout(0.1)
-        self.classifier = nn.Linear(config.hidden_size, num_labels)
-        self.name = "BigBird"
-    
-    def forward(self, input_ids, attention_mask=None, labels=None):
-        outputs = self.bigbird(input_ids=input_ids, attention_mask=attention_mask)
-        pooled_output = outputs.pooler_output
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
-        
-        loss = None
-        if labels is not None:
-            loss = nn.CrossEntropyLoss()(logits, labels)
-        
-        return {'loss': loss, 'logits': logits}
-
+# Mamba
 class MambaForLEDGAR(nn.Module):
     def __init__(self, num_labels=100, d_model=768, n_layer=12):
         super().__init__()
@@ -661,9 +702,10 @@ class MambaForLEDGAR(nn.Module):
             self.name = "Mamba"
             self.available = True
             
+            self.to(DEVICE_0)
+            
         except ImportError:
-            if is_main_process():
-                logger.warning("Mamba not available")
+            logger.warning("Mamba not available")
             self.available = False
             self.name = "Mamba (unavailable)"
     
@@ -692,6 +734,7 @@ class MambaForLEDGAR(nn.Module):
         
         return {'loss': loss, 'logits': logits}
 
+# RetNet
 class RetNetForLEDGAR(nn.Module):
     def __init__(self, num_labels=100, d_model=768, n_layer=12):
         super().__init__()
@@ -713,9 +756,10 @@ class RetNetForLEDGAR(nn.Module):
             self.name = "RetNet"
             self.available = True
             
+            self.to(DEVICE_0)
+            
         except ImportError:
-            if is_main_process():
-                logger.warning("RetNet not available")
+            logger.warning("RetNet not available")
             self.available = False
             self.name = "RetNet (unavailable)"
     
@@ -734,6 +778,7 @@ class RetNetForLEDGAR(nn.Module):
         
         return {'loss': loss, 'logits': logits}
 
+# YOCO
 class YOCOForLEDGAR(nn.Module):
     def __init__(self, num_labels=100, d_model=768, n_layer=12):
         super().__init__()
@@ -753,6 +798,8 @@ class YOCOForLEDGAR(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.classifier = nn.Linear(d_model, num_labels)
         self.name = "YOCO"
+        
+        self.to(DEVICE_0)
     
     def forward(self, input_ids, attention_mask=None, labels=None):
         x = self.embedding(input_ids)
@@ -778,14 +825,10 @@ class YOCOForLEDGAR(nn.Module):
 # ====================== EFFICIENCY & STATISTICS ======================
 
 class EfficiencyMetrics:
-    def __init__(self, device='cuda'):
+    def __init__(self, device='cuda:0'):
         self.device = device
     
     def count_parameters(self, model):
-        # Handle DDP wrapped models
-        if isinstance(model, DDP):
-            model = model.module
-        
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         return {
@@ -795,28 +838,25 @@ class EfficiencyMetrics:
         }
     
     def measure_inference_time(self, model, dataloader, num_runs=100):
-        # Unwrap DDP
-        if isinstance(model, DDP):
-            model = model.module
-        
         model.eval()
         times = []
         
         with torch.no_grad():
             for batch in dataloader:
-                if isinstance(batch, dict):
-                    _ = model(**{k: v.to(self.device) for k, v in batch.items() if k != 'labels'})
+                # Move to first device
+                batch = {k: v.to(DEVICE_0) for k, v in batch.items() if k != 'labels'}
+                _ = model(**batch)
                 break
         
         with torch.no_grad():
             for _ in range(num_runs):
                 for batch in dataloader:
+                    batch = {k: v.to(DEVICE_0) for k, v in batch.items() if k != 'labels'}
+                    
                     start = time.time()
+                    _ = model(**batch)
                     
-                    if isinstance(batch, dict):
-                        _ = model(**{k: v.to(self.device) for k, v in batch.items() if k != 'labels'})
-                    
-                    if self.device == 'cuda':
+                    if torch.cuda.is_available():
                         torch.cuda.synchronize()
                     
                     times.append(time.time() - start)
@@ -828,28 +868,29 @@ class EfficiencyMetrics:
         }
     
     def measure_memory(self, model, dataloader):
-        if self.device != 'cuda':
+        if not torch.cuda.is_available():
             return {'peak_memory_mb': 0}
         
-        # Unwrap DDP
-        if isinstance(model, DDP):
-            model = model.module
-        
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats(0)
+        if USE_MODEL_PARALLEL:
+            torch.cuda.reset_peak_memory_stats(1)
         torch.cuda.empty_cache()
         
         model.eval()
         with torch.no_grad():
             for batch in dataloader:
-                if isinstance(batch, dict):
-                    _ = model(**{k: v.to(self.device) for k, v in batch.items() if k != 'labels'})
+                batch = {k: v.to(DEVICE_0) for k, v in batch.items() if k != 'labels'}
+                _ = model(**batch)
                 break
         
-        peak_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
+        peak_memory_0 = torch.cuda.max_memory_allocated(0) / 1024 / 1024
+        peak_memory_1 = torch.cuda.max_memory_allocated(1) / 1024 / 1024 if USE_MODEL_PARALLEL else 0
         
         return {
-            'peak_memory_mb': peak_memory,
-            'peak_memory_gb': peak_memory / 1024
+            'peak_memory_gpu0_mb': peak_memory_0,
+            'peak_memory_gpu1_mb': peak_memory_1,
+            'peak_memory_total_mb': peak_memory_0 + peak_memory_1,
+            'peak_memory_total_gb': (peak_memory_0 + peak_memory_1) / 1024
         }
 
 class StatisticalAnalysis:
@@ -876,21 +917,16 @@ class StatisticalAnalysis:
             'ci_upper': upper
         }
 
-# ====================== DDP TRAINER ======================
+# ====================== TRAINER ======================
 
-class DDPModelTrainer:
-    def __init__(self, model, config: ExperimentConfig, model_name: str, rank: int, local_rank: int):
+class ModelTrainer:
+    def __init__(self, model, config: ExperimentConfig, model_name: str):
+        self.model = model
         self.config = config
         self.model_name = model_name
-        self.rank = rank
-        self.local_rank = local_rank
-        self.device = f'cuda:{local_rank}'
-        
-        # Move model to device and wrap with DDP
-        model = model.to(self.device)
-        self.model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     
     def train(self, train_loader, val_loader):
+        # Get parameters from all devices
         optimizer = AdamW(
             self.model.parameters(),
             lr=self.config.learning_rate,
@@ -909,19 +945,16 @@ class DDPModelTrainer:
         
         for epoch in range(self.config.num_epochs):
             self.model.train()
-            train_loader.sampler.set_epoch(epoch)  # Important for DDP
-            
             total_loss = 0
             
-            if is_main_process():
-                pbar = tqdm(train_loader, desc=f"{self.model_name} Epoch {epoch+1}/{self.config.num_epochs}")
-            else:
-                pbar = train_loader
-            
+            pbar = tqdm(train_loader, desc=f"{self.model_name} Epoch {epoch+1}/{self.config.num_epochs}")
             for batch in pbar:
-                batch = {k: v.to(self.device) for k, v in batch.items()}
+                # Move to first device (model handles internal transfers)
+                input_ids = batch['input_ids'].to(DEVICE_0)
+                attention_mask = batch['attention_mask'].to(DEVICE_0)
+                labels = batch['labels'].to(DEVICE_0)
                 
-                outputs = self.model(**batch)
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs['loss']
                 
                 loss.backward()
@@ -932,29 +965,25 @@ class DDPModelTrainer:
                 optimizer.zero_grad()
                 
                 total_loss += loss.item()
+                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
                 
-                if is_main_process():
-                    pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                # Clear cache periodically
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             
             avg_loss = total_loss / len(train_loader)
+            val_metrics, _ = self.evaluate(val_loader)
             
-            # Validation (only on main process for simplicity)
-            if is_main_process():
-                val_metrics, _ = self.evaluate(val_loader)
-                logger.info(f"{self.model_name} Epoch {epoch+1}: Loss={avg_loss:.4f}, F1={val_metrics['f1_macro']:.4f}")
-                
-                training_stats.append({
-                    'epoch': epoch + 1,
-                    'train_loss': avg_loss,
-                    **val_metrics
-                })
-                
-                if val_metrics['f1_macro'] > best_f1:
-                    best_f1 = val_metrics['f1_macro']
+            logger.info(f"{self.model_name} Epoch {epoch+1}: Loss={avg_loss:.4f}, F1={val_metrics['f1_macro']:.4f}")
             
-            # Sync across processes
-            if dist.is_initialized():
-                dist.barrier()
+            training_stats.append({
+                'epoch': epoch + 1,
+                'train_loss': avg_loss,
+                **val_metrics
+            })
+            
+            if val_metrics['f1_macro'] > best_f1:
+                best_f1 = val_metrics['f1_macro']
         
         return training_stats
     
@@ -965,15 +994,16 @@ class DDPModelTrainer:
         
         with torch.no_grad():
             for batch in dataloader:
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                labels = batch.pop('labels')
+                input_ids = batch['input_ids'].to(DEVICE_0)
+                attention_mask = batch['attention_mask'].to(DEVICE_0)
+                labels = batch['labels']
                 
-                outputs = self.model(**batch)
-                logits = outputs['logits']
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = outputs['logits'].cpu()
                 preds = torch.argmax(logits, dim=-1)
                 
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                all_preds.extend(preds.numpy())
+                all_labels.extend(labels.numpy())
         
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
@@ -988,61 +1018,28 @@ class DDPModelTrainer:
 
 # ====================== MAIN EXPERIMENT ======================
 
-class ComprehensiveDDPExperiment:
-    def __init__(self, config: ExperimentConfig, rank: int, world_size: int, local_rank: int):
+class ComprehensiveExperiment:
+    def __init__(self, config: ExperimentConfig):
         self.config = config
-        self.rank = rank
-        self.world_size = world_size
-        self.local_rank = local_rank
-        self.device = f'cuda:{local_rank}'
-        
         self.results = {}
         self.predictions = {}
-        self.efficiency_metrics = EfficiencyMetrics(self.device)
+        self.efficiency_metrics = EfficiencyMetrics()
         self.statistical_analysis = StatisticalAnalysis(config)
         
-        if is_main_process():
-            Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+        Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     
     def load_datasets(self):
-        if is_main_process():
-            logger.info("Loading datasets...")
-        
+        logger.info("Loading datasets...")
         tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
         
         self.train_dataset = LEDGARDataset('train', tokenizer, self.config.max_seq_length, self.config.max_train_samples)
         self.val_dataset = LEDGARDataset('validation', tokenizer, self.config.max_seq_length, self.config.max_val_samples)
         self.test_dataset = LEDGARDataset('test', tokenizer, self.config.max_seq_length, self.config.max_test_samples)
         
-        # For sklearn (only on main process)
-        if is_main_process():
-            self.train_dataset_sklearn = LEDGARDataset('train', None, self.config.max_seq_length, self.config.max_train_samples, for_sklearn=True)
-            self.test_dataset_sklearn = LEDGARDataset('test', None, self.config.max_seq_length, self.config.max_test_samples, for_sklearn=True)
-    
-    def create_ddp_dataloaders(self, dataset, batch_size, shuffle=False):
-        """Create DDP-compatible dataloader"""
-        sampler = DistributedSampler(
-            dataset,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            shuffle=shuffle
-        )
-        
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            sampler=sampler,
-            num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory
-        )
-        
-        return loader
+        self.train_dataset_sklearn = LEDGARDataset('train', None, self.config.max_seq_length, self.config.max_train_samples, for_sklearn=True)
+        self.test_dataset_sklearn = LEDGARDataset('test', None, self.config.max_seq_length, self.config.max_test_samples, for_sklearn=True)
     
     def run_tfidf_svm(self):
-        """TFIDF-SVM only on main process"""
-        if not is_main_process():
-            return
-        
         logger.info("\n" + "="*60)
         logger.info("Running TFIDF-SVM")
         logger.info("="*60)
@@ -1067,10 +1064,9 @@ class ComprehensiveDDPExperiment:
         logger.info(f"TFIDF-SVM: F1-Macro={test_metrics['f1_macro']:.4f}")
     
     def run_neural_model(self, model_class, model_name, model_kwargs=None):
-        if is_main_process():
-            logger.info("\n" + "="*60)
-            logger.info(f"Running {model_name}")
-            logger.info("="*60)
+        logger.info("\n" + "="*60)
+        logger.info(f"Running {model_name}")
+        logger.info("="*60)
         
         try:
             if model_kwargs is None:
@@ -1078,81 +1074,88 @@ class ComprehensiveDDPExperiment:
             model = model_class(num_labels=100, **model_kwargs)
             
             if hasattr(model, 'available') and not model.available:
-                if is_main_process():
-                    logger.warning(f"{model_name} not available, skipping")
+                logger.warning(f"{model_name} not available, skipping")
                 return
             
-            # Create DDP dataloaders
-            train_loader = self.create_ddp_dataloaders(self.train_dataset, self.config.batch_size, shuffle=True)
-            val_loader = self.create_ddp_dataloaders(self.val_dataset, self.config.eval_batch_size, shuffle=False)
-            test_loader = self.create_ddp_dataloaders(self.test_dataset, self.config.eval_batch_size, shuffle=False)
+            train_loader = DataLoader(
+                self.train_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=True,
+                num_workers=self.config.num_workers,
+                pin_memory=self.config.pin_memory
+            )
             
-            # Train with DDP
-            trainer = DDPModelTrainer(model, self.config, model_name, self.rank, self.local_rank)
+            val_loader = DataLoader(
+                self.val_dataset,
+                batch_size=self.config.eval_batch_size,
+                num_workers=self.config.num_workers,
+                pin_memory=self.config.pin_memory
+            )
+            
+            test_loader = DataLoader(
+                self.test_dataset,
+                batch_size=self.config.eval_batch_size,
+                num_workers=self.config.num_workers,
+                pin_memory=self.config.pin_memory
+            )
+            
+            trainer = ModelTrainer(model, self.config, model_name)
             
             start_time = time.time()
             training_stats = trainer.train(train_loader, val_loader)
             train_time = time.time() - start_time
             
-            # Evaluation only on main process
-            if is_main_process():
-                test_metrics, predictions = trainer.evaluate(test_loader)
-                
-                efficiency = {}
-                efficiency.update(self.efficiency_metrics.count_parameters(trainer.model))
-                efficiency['train_time_sec'] = train_time
-                
-                if self.config.measure_runtime:
-                    timing = self.efficiency_metrics.measure_inference_time(
-                        trainer.model, test_loader, self.config.num_timing_runs
-                    )
-                    efficiency.update(timing)
-                
-                if self.config.measure_memory:
-                    memory = self.efficiency_metrics.measure_memory(trainer.model, test_loader)
-                    efficiency.update(memory)
-                
-                self.results[model_name] = {
-                    'performance': test_metrics,
-                    'efficiency': efficiency,
-                    'training_stats': training_stats
-                }
-                self.predictions[model_name] = predictions
-                
-                logger.info(f"{model_name}: F1-Macro={test_metrics['f1_macro']:.4f}, Params={efficiency['total_params_M']:.1f}M")
+            test_metrics, predictions = trainer.evaluate(test_loader)
             
-            # Cleanup
-            del trainer
+            efficiency = {}
+            efficiency.update(self.efficiency_metrics.count_parameters(model))
+            efficiency['train_time_sec'] = train_time
+            
+            if self.config.measure_runtime:
+                timing = self.efficiency_metrics.measure_inference_time(model, test_loader, self.config.num_timing_runs)
+                efficiency.update(timing)
+            
+            if self.config.measure_memory:
+                memory = self.efficiency_metrics.measure_memory(model, test_loader)
+                efficiency.update(memory)
+            
+            self.results[model_name] = {
+                'performance': test_metrics,
+                'efficiency': efficiency,
+                'training_stats': training_stats
+            }
+            self.predictions[model_name] = predictions
+            
+            logger.info(f"{model_name}: F1-Macro={test_metrics['f1_macro']:.4f}, Params={efficiency['total_params_M']:.1f}M")
+            
+            # Log memory usage
+            if USE_MODEL_PARALLEL and 'peak_memory_total_mb' in efficiency:
+                logger.info(f"{model_name} Memory: GPU0={efficiency['peak_memory_gpu0_mb']:.1f}MB, "
+                           f"GPU1={efficiency['peak_memory_gpu1_mb']:.1f}MB, "
+                           f"Total={efficiency['peak_memory_total_mb']:.1f}MB")
+            
+            del model, trainer
             torch.cuda.empty_cache()
             gc.collect()
             
-            # Sync across processes
-            if dist.is_initialized():
-                dist.barrier()
-            
         except Exception as e:
-            if is_main_process():
-                logger.error(f"Error running {model_name}: {e}")
-                import traceback
-                traceback.print_exc()
+            logger.error(f"Error running {model_name}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def run_all_models(self):
-        # Classical (main process only)
+        # Classical
         self.run_tfidf_svm()
         
-        # Sync before neural models
-        if dist.is_initialized():
-            dist.barrier()
-        
-        # Sparse attention self.run_neural_model(LongformerForLEDGAR, "Longformer")
-        self.run_neural_model(BigBirdForLEDGAR, "BigBird")
+        # Sparse attention
+        self.run_neural_model(LongformerForLEDGAR, "Longformer")
         
         # Recent models
         self.run_neural_model(MambaForLEDGAR, "Mamba", {'n_layer': 12})
         self.run_neural_model(RetNetForLEDGAR, "RetNet", {'n_layer': 12})
         self.run_neural_model(YOCOForLEDGAR, "YOCO", {'n_layer': 12})
         
-        # TAN
+        # TAN with Model Parallelism
         tan_config = TANConfig(
             vocab_size=30522,
             embed_dim=768,
@@ -1161,14 +1164,14 @@ class ComprehensiveDDPExperiment:
             max_seq_length=512,
             k_neighbors=32,
             use_topology=True,
-            use_lsh=True
+            use_lsh=True,
+            use_model_parallel=USE_MODEL_PARALLEL,
+            device_0=DEVICE_0,
+            device_1=DEVICE_1
         )
-        self.run_neural_model(lambda **kwargs: TANForLegalClassification(tan_config, **kwargs), "TAN")
+        self.run_neural_model(lambda **kwargs: ModelParallelTANForLegalClassification(tan_config, **kwargs), "TAN")
     
     def perform_statistical_analysis(self):
-        if not is_main_process():
-            return
-        
         logger.info("\n" + "="*60)
         logger.info("Statistical Analysis")
         logger.info("="*60)
@@ -1192,9 +1195,6 @@ class ComprehensiveDDPExperiment:
         self.results['statistical_analysis'] = statistical_results
     
     def save_results(self):
-        if not is_main_process():
-            return
-        
         output_file = Path(self.config.output_dir) / 'comprehensive_results.json'
         
         with open(output_file, 'w') as f:
@@ -1205,11 +1205,8 @@ class ComprehensiveDDPExperiment:
         self.create_summary_table()
     
     def create_summary_table(self):
-        if not is_main_process():
-            return
-        
         logger.info("\n" + "="*80)
-        logger.info("COMPREHENSIVE LEDGAR EVALUATION RESULTS (DDP)")
+        logger.info("LEDGAR EVALUATION WITH MODEL PARALLELISM")
         logger.info("="*80)
         
         logger.info("\nPERFORMANCE METRICS:")
@@ -1234,48 +1231,41 @@ class ComprehensiveDDPExperiment:
             eff = results['efficiency']
             params = eff.get('total_params_M', 0)
             infer = eff.get('mean_inference_time_ms', 0)
-            memory = eff.get('peak_memory_mb', 0)
+            memory = eff.get('peak_memory_total_mb', eff.get('peak_memory_mb', 0))
             
             logger.info(f"{model_name:<20} {params:>12.2f} {infer:>12.2f} {memory:>12.1f}")
 
 # ====================== MAIN ======================
 
 def main():
-    # Setup DDP
-    rank, world_size, local_rank = setup_ddp()
+    logger.info("="*80)
+    logger.info("LEDGAR EVALUATION WITH MODEL PARALLELISM")
+    logger.info("="*80)
     
-    # Setup logging
-    global logger
-    logger = setup_logging()
+    if USE_MODEL_PARALLEL:
+        logger.info(f"✓ Model Parallelism ENABLED")
+        logger.info(f"  GPU 0: {DEVICE_0}")
+        logger.info(f"  GPU 1: {DEVICE_1}")
+    else:
+        logger.info(f"✗ Model Parallelism DISABLED (using single GPU: {DEVICE_0})")
     
-    if is_main_process():
-        logger.info(f"Running on {world_size} GPU(s)")
-        logger.info(f"Each GPU: ~15GB, Total: {world_size * 15}GB")
-    
-    # Configuration
     config = ExperimentConfig(
-        max_train_samples=None,  # Use full 60K
+        max_train_samples=None,
         num_epochs=20,
-        batch_size=16,  # Per GPU
+        batch_size=8,
+        use_gradient_checkpointing=True,
         measure_runtime=True,
         measure_memory=True,
-        output_dir='./ledgar_ddp_results'
+        output_dir='./ledgar_model_parallel_results'
     )
     
-    try:
-        # Run experiment
-        experiment = ComprehensiveDDPExperiment(config, rank, world_size, local_rank)
-        experiment.load_datasets()
-        experiment.run_all_models()
-        experiment.perform_statistical_analysis()
-        experiment.save_results()
-        
-        if is_main_process():
-            logger.info("\n✓ Comprehensive LEDGAR DDP evaluation complete!")
+    experiment = ComprehensiveExperiment(config)
+    experiment.load_datasets()
+    experiment.run_all_models()
+    experiment.perform_statistical_analysis()
+    experiment.save_results()
     
-    finally:
-        # Cleanup
-        cleanup_ddp()
+    logger.info("\n✓ Comprehensive LEDGAR evaluation complete!")
 
 if __name__ == "__main__":
     main()
