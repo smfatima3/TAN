@@ -1866,7 +1866,8 @@ class SummarizationTrainer:
         batch_size = batch['input_ids'].shape[0]
         
         # Start with BOS token
-        decoder_input = jnp.full((batch_size, 1), tokenizer.cls_token_id or 101, dtype=jnp.int32)
+        cls_id = tokenizer.cls_token_id if tokenizer.cls_token_id is not None else 101
+        decoder_input = jnp.full((batch_size, 1), cls_id, dtype=jnp.int32)
         
         for _ in range(max_length):
             logits = self.model.apply(
@@ -1881,8 +1882,9 @@ class SummarizationTrainer:
             next_token = jnp.argmax(logits[:, -1, :], axis=-1, keepdims=True)
             decoder_input = jnp.concatenate([decoder_input, next_token], axis=1)
             
-            # Check for EOS
-            if jnp.all(next_token == tokenizer.sep_token_id or next_token == 102):
+            # Check for EOS (use bitwise OR for JAX arrays)
+            eos_mask = (next_token == tokenizer.sep_token_id) | (next_token == 102)
+            if jnp.all(eos_mask):
                 break
         
         return decoder_input
@@ -2018,32 +2020,6 @@ class QMSumExperiment:
     
     def run_all_models(self):
         """Run all model experiments."""
-        
-        # TAN (full model) - uses embed_dim, not d_model
-        self.run_model(
-            TANForSummarization, "TAN",
-            {'vocab_size': 30522, 'embed_dim': 512, 'num_heads': 8, 
-             'num_encoder_layers': 6, 'num_decoder_layers': 6,
-             'k_neighbors': 32, 'topology_dim': 128, 'use_topology': True,
-             'max_position_embeddings': self.config.max_source_length}
-        )
-        
-        # TAN ablation - without topology
-        self.run_model(
-            TANForSummarization, "TAN-NoTopology",
-            {'vocab_size': 30522, 'embed_dim': 512, 'num_heads': 8,
-             'num_encoder_layers': 6, 'num_decoder_layers': 6,
-             'k_neighbors': 32, 'topology_dim': 128, 'use_topology': False,
-             'max_position_embeddings': self.config.max_source_length}
-        )
-        
-        # Mamba - uses d_model, no num_heads
-        self.run_model(
-            MambaForSummarization, "Mamba",
-            {'vocab_size': 30522, 'd_model': 512, 'n_layer': 12,
-             'd_state': 16, 'd_conv': 4, 'expand': 2,
-             'max_position_embeddings': self.config.max_source_length}
-        )
         
         # Samba - uses d_model
         self.run_model(
@@ -2227,14 +2203,14 @@ def main():
     logger.info("")
     
     config = ExperimentConfig(
-        max_train_samples=1000,  # Reduce for faster testing
-        max_val_samples=500,
+        max_train_samples=800,  # Reduce for faster testing
+        max_val_samples=200,
         max_test_samples=500,
         max_source_length=2048,  # Long context
         max_target_length=256,
-        num_epochs=10,  # Reduce for testing
-        batch_size=4,
-        eval_batch_size=4,
+        num_epochs=8,  # Reduce for testing
+        batch_size=2,
+        eval_batch_size=2,
         use_bfloat16=True,
         output_dir='./qmsum_results',
         seed=42
