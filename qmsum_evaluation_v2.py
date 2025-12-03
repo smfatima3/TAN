@@ -2206,12 +2206,12 @@ def main():
     logger.info("")
     
     config = ExperimentConfig(
-        max_train_samples=200,  # Reduce for faster testing
-        max_val_samples=50,
-        max_test_samples=100,
+        max_train_samples=800,  # Reduce for faster testing
+        max_val_samples=200,
+        max_test_samples=500,
         max_source_length=2048,  # Long context
         max_target_length=256,
-        num_epochs=5,  # Reduce for testing
+        num_epochs=8,  # Reduce for testing
         batch_size=2,
         eval_batch_size=2,
         use_bfloat16=True,
