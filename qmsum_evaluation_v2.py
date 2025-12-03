@@ -2045,30 +2045,7 @@ class QMSumExperiment:
             {'vocab_size': 30522, 'd_model': 512, 'n_layer': 12,
              'd_state': 16, 'd_conv': 4, 'expand': 2,
              'max_position_embeddings': self.config.max_source_length}
-        )
-        
-        # Samba - uses d_model
-        self.run_model(
-            SambaForSummarization, "Samba",
-            {'vocab_size': 30522, 'd_model': 512, 'num_heads': 8, 'n_layer': 12,
-             'window_size': 512, 'd_state': 16,
-             'max_position_embeddings': self.config.max_source_length}
-        )
-        
-        # HGRN2 - uses d_model, no num_heads
-        self.run_model(
-            HGRN2ForSummarization, "HGRN2",
-            {'vocab_size': 30522, 'd_model': 512, 'n_layer': 12, 'd_state': 64,
-             'max_position_embeddings': self.config.max_source_length}
-        )
-        
-        # HDT - uses d_model
-        self.run_model(
-            HDTForSummarization, "HDT",
-            {'vocab_size': 30522, 'd_model': 512, 'num_heads': 8, 'n_layer': 12,
-             'max_position_embeddings': self.config.max_source_length}
-        )
-        
+      
         # RWKV-7 - uses d_model
         self.run_model(
             RWKV7ForSummarization, "RWKV-7",
