@@ -2045,7 +2045,7 @@ class QMSumExperiment:
             {'vocab_size': 30522, 'd_model': 512, 'n_layer': 12,
              'd_state': 16, 'd_conv': 4, 'expand': 2,
              'max_position_embeddings': self.config.max_source_length}
-      
+        )
         # RWKV-7 - uses d_model
         self.run_model(
             RWKV7ForSummarization, "RWKV-7",
