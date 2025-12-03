@@ -2021,13 +2021,7 @@ class QMSumExperiment:
     def run_all_models(self):
         """Run all model experiments."""
         
-        # Samba - uses d_model
-        self.run_model(
-            SambaForSummarization, "Samba",
-            {'vocab_size': 30522, 'd_model': 512, 'num_heads': 8, 'n_layer': 12,
-             'window_size': 512, 'd_state': 16,
-             'max_position_embeddings': self.config.max_source_length}
-        )
+     
         
         # HGRN2 - uses d_model, no num_heads
         self.run_model(
